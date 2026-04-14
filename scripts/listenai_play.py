@@ -649,6 +649,21 @@ def describe_target(platform_name: str, device_key: Optional[str]) -> str:
     return "default render device"
 
 
+def summarize_records(items: List[DeviceRecord]) -> str:
+    if not items:
+        return "none"
+    return "; ".join(f"{item.device_key} ({item.name} -> {item.backend_target})" for item in items)
+
+
+def ensure_default_render_allowed(render_items: List[DeviceRecord], force_default: bool) -> None:
+    if force_default or len(render_items) <= 1:
+        return
+    raise RuntimeError(
+        "Multiple active ListenAI Render endpoints found; refusing ambiguous default-device playback. "
+        f"Use --device-key KEY or --force-default to override. Active devices: {summarize_records(render_items)}"
+    )
+
+
 def execute_worker(
     platform_name: str,
     device_key: Optional[str],
@@ -784,6 +799,9 @@ def run_scan(args: argparse.Namespace) -> int:
 
 def run_probe(args: argparse.Namespace) -> int:
     platform_name = resolve_platform(args.platform)
+    if not args.device_key:
+        render_items = filter_direction(scan_devices(platform_name), "Render")
+        ensure_default_render_allowed(render_items, args.force_default)
     print(f"Target {describe_target(platform_name, args.device_key)}")
     invoke_worker_once(
         script_path=Path(__file__),
@@ -801,6 +819,9 @@ def run_play(args: argparse.Namespace) -> int:
     audio_file = Path(args.audio_file).resolve()
     if not audio_file.exists():
         raise FileNotFoundError(audio_file)
+    if not args.device_key:
+        render_items = filter_direction(scan_devices(platform_name), "Render")
+        ensure_default_render_allowed(render_items, args.force_default)
 
     normalized = make_temp_wav()
     try:
@@ -841,6 +862,11 @@ def run_dual_play(args: argparse.Namespace) -> int:
         raise FileNotFoundError(left_file)
     if not right_file.exists():
         raise FileNotFoundError(right_file)
+    render_items = filter_direction(scan_devices(platform_name), "Render")
+    if not args.left_device_key:
+        ensure_default_render_allowed(render_items, args.force_default_left)
+    if not args.right_device_key:
+        ensure_default_render_allowed(render_items, args.force_default_right)
 
     left_normalized = make_temp_wav()
     right_normalized = make_temp_wav()
@@ -956,6 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe_parser.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     probe_parser.add_argument("--device-key")
+    probe_parser.add_argument("--force-default", action="store_true")
     probe_parser.set_defaults(func=run_probe)
 
     play_parser = subparsers.add_parser(
@@ -963,6 +990,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play_parser.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     play_parser.add_argument("--device-key")
+    play_parser.add_argument("--force-default", action="store_true")
     play_parser.add_argument("--audio-file", required=True)
     play_parser.add_argument("--repeat", type=int, default=1)
     play_parser.add_argument("--gap", type=float, default=0.0)
@@ -975,8 +1003,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dual_parser.add_argument("--platform", choices=("auto", "windows", "linux"), default="auto")
     dual_parser.add_argument("--left-device-key")
+    dual_parser.add_argument("--force-default-left", action="store_true")
     dual_parser.add_argument("--left-file", required=True)
     dual_parser.add_argument("--right-device-key")
+    dual_parser.add_argument("--force-default-right", action="store_true")
     dual_parser.add_argument("--right-file", required=True)
     dual_parser.add_argument("--repeat", type=int, default=1)
     dual_parser.add_argument("--gap", type=float, default=0.0)
