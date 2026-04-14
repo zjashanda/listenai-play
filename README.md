@@ -4,11 +4,11 @@ Scan active device keys, install or refresh the laid command when needed, and pl
 
 ## Skill layout
 
+- `SKILL.md`
 - `agents/openai.yaml`
 - `scripts/install_laid_linux.sh`
 - `scripts/install_laid_windows.ps1`
 - `scripts/listenai_play.py`
-- `SKILL.md`
 
 ## Install the skill
 

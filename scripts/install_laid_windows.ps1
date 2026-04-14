@@ -39,6 +39,36 @@ function Get-ListenAIWaveFormatChannels {
     return [int][BitConverter]::ToUInt16($Blob, $offset + 2)
 }
 
+function Get-ListenAIDeviceKeyFromInterface {
+    [CmdletBinding()]
+    param(
+        [string]$Interface
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Interface)) {
+        return $null
+    }
+
+    if ($Interface -notmatch 'USB\\(?<Head>[^\\]+)\\(?<Tail>.+)$') {
+        return $null
+    }
+
+    $vidPid = ($matches['Head'] -replace '&MI_[0-9A-F]{2}$', '').ToUpperInvariant()
+    if ($vidPid -notmatch '^VID_[0-9A-F]{4}&PID_[0-9A-F]{4}$') {
+        return $null
+    }
+
+    $token = ($matches['Tail'] -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpperInvariant()
+    if ($token -match '^([A-Z0-9]{4,})_0_([A-Z0-9]{2,})$') {
+        $token = "$($matches[1])_$($matches[2])"
+    }
+    if (-not $token) {
+        return $null
+    }
+
+    return "$vidPid:$token"
+}
+
 function Get-ListenAIDeviceKeys {
     [CmdletBinding()]
     param(
@@ -73,11 +103,12 @@ function Get-ListenAIDeviceKeys {
             $channels = Get-ListenAIWaveFormatChannels $props.'{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0'
 
             $interface = $props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
-            if ($interface -notmatch 'USB\\(VID_[0-9A-F]{4}&PID_[0-9A-F]{4})(?:&MI_[0-9A-F]{2})?\\[^&]+&([^&]+)&') { return }
+            $deviceKey = Get-ListenAIDeviceKeyFromInterface $interface
+            if (-not $deviceKey) { return }
 
             [pscustomobject]@{
                 Direction    = $root.Direction
-                DeviceKey    = ($matches[1].ToUpper() + ':' + $matches[2].ToUpper())
+                DeviceKey    = $deviceKey
                 Channels     = $(if ($null -eq $channels) { '?' } else { $channels })
                 FriendlyName = $endpointMap[$_.PSChildName.ToLower()]
                 EndpointId   = $_.PSChildName

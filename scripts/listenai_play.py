@@ -40,6 +40,33 @@ function Get-ListenAIWaveFormatChannels {
     return [int][BitConverter]::ToUInt16($Blob, $offset + 2)
 }
 
+function Get-ListenAIDeviceKey {
+    param([string]$Interface)
+
+    if ([string]::IsNullOrWhiteSpace($Interface)) {
+        return $null
+    }
+
+    if ($Interface -notmatch 'USB\\(?<Head>[^\\]+)\\(?<Tail>.+)$') {
+        return $null
+    }
+
+    $vidPid = ($matches['Head'] -replace '&MI_[0-9A-F]{2}$', '').ToUpperInvariant()
+    if ($vidPid -notmatch '^VID_[0-9A-F]{4}&PID_[0-9A-F]{4}$') {
+        return $null
+    }
+
+    $token = ($matches['Tail'] -replace '[^A-Za-z0-9]+', '_').Trim('_').ToUpperInvariant()
+    if ($token -match '^([A-Z0-9]{4,})_0_([A-Z0-9]{2,})$') {
+        $token = "$($matches[1])_$($matches[2])"
+    }
+    if (-not $token) {
+        return $null
+    }
+
+    return "$vidPid:$token"
+}
+
 $endpointMap = @{}
 Get-PnpDevice -Class AudioEndpoint -PresentOnly | ForEach-Object {
     if ($_.InstanceId -match 'SWD\\MMDEVAPI\\\{[^}]+\}\.\{([0-9A-Fa-f-]+)\}$') {
@@ -69,6 +96,7 @@ $items = foreach ($root in $roots) {
             Name         = $props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'
             EndpointId   = $_.PSChildName
             Interface    = $props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
+            DeviceKey    = Get-ListenAIDeviceKey $props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
             Channels     = Get-ListenAIWaveFormatChannels $props.'{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0'
         }
     }
@@ -222,21 +250,19 @@ def powershell_json(script: str) -> object:
 
 
 def derive_device_key_from_interface(interface: str) -> str:
-    match = re.search(r"USB\\(.+)$", interface or "", flags=re.IGNORECASE)
+    match = re.search(r"USB\\(?P<head>[^\\]+)\\(?P<tail>.+)$", interface or "", flags=re.IGNORECASE)
     if not match:
         return ""
 
-    usb_part = match.group(1)
-    head, sep, tail = usb_part.partition("\\")
-    if not sep:
+    vid_pid = re.sub(r"&MI_[0-9A-F]{2}$", "", match.group("head"), flags=re.IGNORECASE).upper()
+    if not re.fullmatch(r"VID_[0-9A-F]{4}&PID_[0-9A-F]{4}", vid_pid):
         return ""
 
-    vid_pid = re.sub(r"&MI_[0-9A-F]{2}$", "", head, flags=re.IGNORECASE).upper()
-    parts = tail.split("&")
-    if len(parts) < 4 or not parts[1]:
+    token = compact_token(match.group("tail"))
+    if not token:
         return ""
 
-    return f"{vid_pid}:{parts[1].upper()}"
+    return f"{vid_pid}:{token}"
 
 
 def scan_windows() -> List[DeviceRecord]:
@@ -247,7 +273,7 @@ def scan_windows() -> List[DeviceRecord]:
     items: List[DeviceRecord] = []
     for row in rows:
         interface = row.get("Interface", "")
-        device_key = derive_device_key_from_interface(interface)
+        device_key = row.get("DeviceKey") or derive_device_key_from_interface(interface)
         if not device_key:
             continue
         name = row.get("FriendlyName") or row.get("Name") or ""
@@ -282,6 +308,25 @@ def sanitize_token(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", raw or "").strip("_").upper()
 
 
+def compact_token(raw: str) -> str:
+    token = sanitize_token(raw)
+    if not token:
+        return ""
+
+    usb_marker = "_USB_"
+    marker_index = token.find(usb_marker)
+    if marker_index >= 0:
+        compacted = token[marker_index + 1 :]
+        if compacted:
+            token = compacted
+
+    serial_port_match = re.fullmatch(r"([A-Z0-9]{4,})_0_([A-Z0-9]{2,})", token)
+    if serial_port_match:
+        return f"{serial_port_match.group(1)}_{serial_port_match.group(2)}"
+
+    return token
+
+
 def parse_udev_properties(dev_path: Path) -> Dict[str, str]:
     udevadm = which("udevadm")
     if not udevadm:
@@ -312,7 +357,8 @@ def linux_identity(card_index: int, control_path: Path) -> Optional[Dict[str, st
     props = parse_udev_properties(control_path)
     vid = props.get("ID_VENDOR_ID", "").upper()
     pid = props.get("ID_MODEL_ID", "").upper()
-    token = sanitize_token(props.get("ID_SERIAL_SHORT") or props.get("ID_PATH_TAG") or "")
+    # Some ListenAI Linux devices expose the same USB serial, so prefer the USB path tag.
+    token = compact_token(props.get("ID_PATH_TAG") or props.get("ID_SERIAL_SHORT") or "")
     if vid and pid:
         return {
             "vid": vid,
@@ -336,7 +382,7 @@ def linux_identity(card_index: int, control_path: Path) -> Optional[Dict[str, st
                 vid = maybe_vid.upper()
                 pid = maybe_pid.upper()
         if not serial:
-            serial = sanitize_token(read_text_if_exists(candidate / "serial"))
+            serial = compact_token(read_text_if_exists(candidate / "serial"))
         if vid and pid and serial:
             break
 
@@ -346,7 +392,7 @@ def linux_identity(card_index: int, control_path: Path) -> Optional[Dict[str, st
     return {
         "vid": vid,
         "pid": pid,
-        "token": serial or derive_token_from_sysfs_path(resolved) or f"CARD{card_index}",
+        "token": compact_token(derive_token_from_sysfs_path(resolved)) or serial or f"CARD{card_index}",
     }
 
 
